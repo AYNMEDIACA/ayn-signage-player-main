@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AYN Signage Player</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; color: #fff; overflow: hidden; font-family: sans-serif; }
+        #player-container { width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
+        #player-container img, #player-container video { max-width: 100%; max-height: 100%; object-fit: contain; }
+        #pairing-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 100; }
+        #pairing-box { background: #333; padding: 40px; border-radius: 8px; text-align: center; }
+        #pairing-code { font-size: 2em; letter-spacing: 0.2em; text-transform: uppercase; padding: 10px; margin: 20px 0; border: 1px solid #555; background: #222; }
+        #error-message { color: #ff4d4d; margin-top: 15px; }
+    </style>
+</head>
+<body>
+    <div id="player-container"></div>
+
+    <div id="pairing-overlay">
+        <div id="pairing-box">
+            <h1>Pair This Screen</h1>
+            <p>Enter the code shown in your CMS dashboard.</p>
+            <input type="text" id="pairing-code" maxlength="6">
+            <button id="pair-button">Pair Device</button>
+            <p id="error-message" style="display:none;"></p>
+        </div>
+    </div>
+
+<script>
+    // --- CONFIGURATION ---
+    // I have filled these in with your project details!
+    const SUPABASE_URL = 'https://hlpihjisaxijhimyufaq.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhscGloamlzYXhpamhpbXl1ZmFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYwODEzMDQsImV4cCI6MjA3MTY1NzMwNH0.ecu2jbGDD6Qb9ct6UR5z2PBaxkvv2OBP5KOmcj1ujHE';
+    const EDGE_FUNCTIONS_BASE_URL = `${SUPABASE_URL}/functions/v1`;
+
+    // --- STATE MANAGEMENT ---
+    let supabase;
+    let currentPlaylist = [];
+    let currentItemIndex = -1;
+    let playbackTimeoutId = null;
+    let realtimeChannel = null;
+
+    // --- DOM ELEMENTS ---
+    const playerContainer = document.getElementById('player-container');
+    const pairingOverlay = document.getElementById('pairing-overlay');
+    const pairingCodeInput = document.getElementById('pairing-code');
+    const pairButton = document.getElementById('pair-button');
+    const errorMessage = document.getElementById('error-message');
+
+    /**
+     * Initializes the player on application start.
+     */
+    async function initializePlayer() {
+        const deviceId = localStorage.getItem('ayn_device_id');
+        const deviceJwt = localStorage.getItem('ayn_device_jwt');
+
+        if (deviceId && deviceJwt) {
+            console.log(`Device already paired. ID: ${deviceId}`);
+            supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+                global: { headers: { Authorization: `Bearer ${deviceJwt}` } },
+            });
+            await start();
+        } else {
+            console.log('No device credentials found. Starting pairing process.');
+            pairingOverlay.style.display = 'flex';
+        }
+    }
+
+    /**
+     * Handles the pairing submission process.
+     */
+    async function handlePairing() {
+        const code = pairingCodeInput.value.trim().toUpperCase();
+        if (code.length !== 6) {
+            showError('Pairing code must be 6 characters.');
+            return;
+        }
+
+        pairButton.disabled = true;
+        showError('');
+
+        try {
+            const response = await fetch(`${EDGE_FUNCTIONS_BASE_URL}/pair-device`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
+                body: JSON.stringify({ pairing_code: code }),
+            });
+
+            if (!response.ok) {
+                const error = await response.json();
+                throw new Error(error.error || 'Pairing failed. Please check the code.');
+            }
+
+            const { device_id, jwt } = await response.json();
+            localStorage.setItem('ayn_device_id', device_id);
+            localStorage.setItem('ayn_device_jwt', jwt);
+
+            console.log('Pairing successful!');
+            pairingOverlay.style.display = 'none';
+            await initializePlayer();
+
+        } catch (error) {
+            console.error('Pairing error:', error);
+            showError(error.message);
+        } finally {
+            pairButton.disabled = false;
+        }
+    }
+
+    /**
+     * Fetches the current playlist from the backend via RPC.
+     */
+    async function fetchPlaylist() {
+        const deviceId = localStorage.getItem('ayn_device_id');
+        if (!deviceId) return;
+
+        console.log('Fetching playlist...');
+        const { data, error } = await supabase.rpc('get_playlist_for_screen', {
+            screen_id_in: deviceId
+        });
+
+        if (error) {
+            console.error('Error fetching playlist:', error);
+            return [];
+        }
+
+        console.log('Playlist received:', data);
+        return data || [];
+    }
+
+    /**
+     * Starts the main playback loop and subscribes to real-time updates.
+     */
+    async function start() {
+        currentPlaylist = await fetchPlaylist();
+        if (currentPlaylist.length > 0) {
+            currentItemIndex = -1;
+            playNextItem();
+        } else {
+            playerContainer.innerHTML = '<h1>No content scheduled for this screen.</h1>';
+        }
+        subscribeToUpdates();
+    }
+
+    /**
+     * Core function that plays the next item in the playlist.
+     */
+    function playNextItem() {
+        clearTimeout(playbackTimeoutId);
+        playerContainer.innerHTML = '';
+
+        if (currentPlaylist.length === 0) {
+            playerContainer.innerHTML = '<h1>Playlist is empty.</h1>';
+            return;
+        }
+
+        currentItemIndex = (currentItemIndex + 1) % currentPlaylist.length;
+        const item = currentPlaylist[currentItemIndex];
+        console.log(`Playing item ${currentItemIndex + 1}/${currentPlaylist.length}: ${item.name}`);
+
+        getSignedMediaUrl(item.storage_path)
+            .then(signedUrl => {
+                if (item.type === 'image') {
+                    const img = document.createElement('img');
+                    img.src = signedUrl;
+                    playerContainer.appendChild(img);
+                    playbackTimeoutId = setTimeout(playNextItem, item.duration_seconds * 1000);
+                } else if (item.type === 'video') {
+                    const video = document.createElement('video');
+                    video.src = signedUrl;
+                    video.autoplay = true;
+                    video.muted = true;
+                    video.onended = playNextItem;
+                    video.onerror = (e) => {
+                        console.error("Video playback error:", e);
+                        playNextItem();
+                    };
+                    playerContainer.appendChild(video);
+                }
+            })
+            .catch(error => {
+                console.error('Could not get signed URL for media item:', error);
+                playNextItem();
+            });
+    }
+
+    /**
+     * Calls an Edge Function to get a secure, short-lived URL for a media asset.
+     */
+    async function getSignedMediaUrl(storagePath) {
+        const response = await fetch(`${EDGE_FUNCTIONS_BASE_URL}/get-signed-media-url`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${localStorage.getItem('ayn_device_jwt')}`
+            },
+            body: JSON.stringify({ storage_path: storagePath })
+        });
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.error || 'Failed to get signed URL');
+        }
+        const { signedURL } = await response.json();
+        return signedURL;
+    }
+
+
+    /**
+     * Subscribes to this screen's unique real-time channel for updates.
+     */
+    function subscribeToUpdates() {
+        const deviceId = localStorage.getItem('ayn_device_id');
+        if (!deviceId || realtimeChannel) return;
+
+        const channelName = `screen:${deviceId}`;
+        console.log(`Subscribing to real-time channel: ${channelName}`);
+
+        realtimeChannel = supabase.channel(channelName);
+
+        realtimeChannel
+            .on('broadcast', { event: 'PLAYLIST_UPDATED' }, (payload) => {
+                console.log('Received PLAYLIST_UPDATED event!', payload);
+                start();
+            })
+            .on('broadcast', { event: 'SCHEDULE_UPDATED' }, (payload) => {
+                console.log('Received SCHEDULE_UPDATED event!', payload);
+                start();
+            })
+            .subscribe((status) => {
+                if (status === 'SUBSCRIBED') {
+                    console.log('Successfully subscribed to real-time updates.');
+                }
+                 if (status === 'CHANNEL_ERROR') {
+                    console.error('Real-time channel error.');
+                }
+            });
+    }
+
+    function showError(message) {
+        errorMessage.textContent = message;
+        errorMessage.style.display = message ? 'block' : 'none';
+    }
+
+    // --- EVENT LISTENERS ---
+    pairButton.addEventListener('click', handlePairing);
+    pairingCodeInput.addEventListener('keyup', (e) => {
+        if (e.key === 'Enter') handlePairing();
+    });
+
+    // --- START THE APPLICATION ---
+    initializePlayer();
+
+</script>
+</body>
+</html>
