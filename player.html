@@ -1,49 +1,50 @@
-!DOCTYPE html
-html lang=en
-head
-    meta charset=UTF-8
-    meta name=viewport content=width=device-width, initial-scale=1.0
-    titleAYN Signage Playertitle
-    script src=httpscdn.jsdelivr.netnpm@supabasesupabase-js@2script
-    style
-        body, html { margin 0; padding 0; width 100%; height 100%; background-color #000; color #fff; overflow hidden; font-family sans-serif; }
-        .container { width 100%; height 100%; display flex; flex-direction column; justify-content center; align-items center; text-align center; }
-        .pairing-box { background #1a1a1a; padding 40px; border-radius 8px; }
-        .pairing-code { font-size 5em; font-family monospace; letter-spacing 0.2em; padding 20px; margin 20px 0; border 1px solid #333; background #000; }
-        .spinner { border 4px solid rgba(255, 255, 255, 0.3); border-radius 50%; border-top 4px solid #fff; width 24px; height 24px; animation spin 1s linear infinite; margin 0 auto; }
-        @keyframes spin { 0% { transform rotate(0deg); } 100% { transform rotate(360deg); } }
-    style
-head
-body
-    div id=loading-view class=container
-        h1Initializing Player...h1
-    div
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AYN Signage Player</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <style>
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; color: #fff; overflow: hidden; font-family: sans-serif; }
+        .container { width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
+        .pairing-box { background: #1a1a1a; padding: 40px; border-radius: 8px; }
+        .pairing-code { font-size: 5em; font-family: monospace; letter-spacing: 0.2em; padding: 20px; margin: 20px 0; border: 1px solid #333; background: #000; }
+        .spinner { border: 4px solid rgba(255, 255, 255, 0.3); border-radius: 50%; border-top: 4px solid #fff; width: 24px; height: 24px; animation: spin 1s linear infinite; margin: 0 auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div id="loading-view" class="container">
+        <h1>Initializing Player...</h1>
+    </div>
 
-    div id=pairing-view class=container style=displaynone;
-        div class=pairing-box
-            h1Pair This Screenh1
-            pEnter the code below into your AYN Signage CMS dashboardp
-            div id=pairing-code-display class=pairing-codediv
-            div class=spinnerdiv
-            pWaiting for manager to claim this screen...p
-        div
-    div
+    <div id="pairing-view" class="container" style="display:none;">
+        <div class="pairing-box">
+            <h1>Pair This Screen</h1>
+            <p>Enter the code below into your AYN Signage CMS dashboard:</p>
+            <div id="pairing-code-display" class="pairing-code"></div>
+            <div class="spinner"></div>
+            <p>Waiting for manager to claim this screen...</p>
+        </div>
+    </div>
 
-    div id=playback-view style=displaynone;
-        div
+    <div id="playback-view" style="display:none;">
+        </div>
 
-script
-     --- CONFIGURATION ---
-    const SUPABASE_URL = 'httpshlpihjisaxijhimyufaq.supabase.co';
+<script>
+    // --- CONFIGURATION ---
+    const SUPABASE_URL = 'https://hlpihjisaxijhimyufaq.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhscGloamlzYXhpamhpbXl1ZmFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYwODEzMDQsImV4cCI6MjA3MTY1NzMwNH0.ecu2jbGDD6Qb9ct6UR5z2PBaxkvv2OBP5KOmcj1ujHE';
 
-    const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    // --- THIS LINE IS NOW FIXED ---
+    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     let pollingInterval = null;
 
-     A simple function to generate a new UUID
+    // A simple function to generate a new UUID
     function generateUUID() {
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace([xy]g, function(c) {
-            var r = Math.random()  16  0, v = c == 'x'  r  (r & 0x3  0x8);
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+            var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
             return v.toString(16);
         });
     }
@@ -53,34 +54,29 @@ script
         let deviceJwt = localStorage.getItem('ayn_device_jwt');
 
         if (deviceJwt) {
-             If we have a JWT, we are already paired and authenticated.
-            console.log(Device is paired. Starting playback.);
+            console.log("Device is paired. Starting playback.");
             showView('playback-view');
             startPlayback(deviceId, deviceJwt);
         } else if (deviceId) {
-             We have an ID but no JWT, meaning we are waiting to be claimed.
-            console.log(Device is waiting to be claimed.);
+            console.log("Device is waiting to be claimed.");
             startPollingForClaim(deviceId);
         } else {
-             This is the first time the player has ever started on this device.
-            console.log(First start. Generating new device ID and pairing code.);
+            console.log("First start. Generating new device ID and pairing code.");
             deviceId = generateUUID();
             localStorage.setItem('ayn_device_id', deviceId);
 
-            const pairingCode = Math.floor(100000 + Math.random()  900000).toString();
+            const pairingCode = Math.floor(100000 + Math.random() * 900000).toString();
             
-             Announce our existence to the backend.
-            const { error } = await supabase.rpc('register_unclaimed_device', {
-                device_id_in deviceId,
-                pairing_code_in pairingCode
+            const { error } = await supabaseClient.rpc('register_unclaimed_device', {
+                device_id_in: deviceId,
+                pairing_code_in: pairingCode
             });
 
             if (error) {
-                alert(Could not register with server  + error.message);
+                alert("Could not register with server: " + error.message);
                 return;
             }
 
-             Display the pairing code and start polling.
             document.getElementById('pairing-code-display').textContent = pairingCode;
             startPollingForClaim(deviceId);
         }
@@ -88,20 +84,17 @@ script
 
     function startPollingForClaim(deviceId) {
         showView('pairing-view');
-         Check every 5 seconds to see if we've been claimed.
-        pollingInterval = setInterval(async () = {
-            console.log(Checking claim status...);
-             We'll create a new function to get the JWT
-            const { data, error } = await supabase.from('screens').select('id').eq('id', deviceId).single();
+        pollingInterval = setInterval(async () => {
+            console.log("Checking claim status...");
+            // Check the main `screens` table to see if our ID exists.
+            const { data, error } = await supabaseClient.from('screens').select('id').eq('id', deviceId).single();
 
             if(data) {
-                 WE'VE BEEN CLAIMED!
-                console.log(Device has been claimed!);
+                // WE'VE BEEN CLAIMED!
+                console.log("Device has been claimed!");
                 clearInterval(pollingInterval);
-                 Now we need a long-term JWT. We'll ask a new Edge Function for it.
-                 For simplicity now, let's just move to the next step. A full JWT flow can be added.
-                 For this MVP, we can assume RLS will be handled by a user role temporarily.
-                localStorage.setItem('ayn_device_jwt', 'TEMPORARY_JWT_NEEDS_REPLACEMENT');  Placeholder
+                // For now, we will just proceed. In the future, this is where we would get a long-term JWT.
+                localStorage.setItem('ayn_device_jwt', 'TEMPORARY_JWT_NEEDS_REPLACEMENT'); // Placeholder
                 showView('playback-view');
                 startPlayback(deviceId, 'TEMPORARY_JWT_NEEDS_REPLACEMENT');
             }
@@ -112,18 +105,18 @@ script
         document.getElementById('loading-view').style.display = 'none';
         document.getElementById('pairing-view').style.display = 'none';
         document.getElementById('playback-view').style.display = 'none';
-        document.getElementById(viewId).style.display = 'flex';
+        // Use flex for containers, block for the playback view
+        document.getElementById(viewId).style.display = (viewId === 'playback-view') ? 'block' : 'flex';
     }
 
     function startPlayback(deviceId, jwt) {
-         This is a placeholder for the full playback logic
         const playbackContainer = document.getElementById('playback-view');
-        playbackContainer.innerHTML = `div class=containerh1Playback Started!h1pDevice ID ${deviceId}ppNext step Fetch and display playlist.pdiv`;
+        playbackContainer.innerHTML = `<div class="container"><h1>Playback Started!</h1><p>Device ID: ${deviceId}</p><p>Next step: Fetch and display playlist.</p></div>`;
         playbackContainer.className = 'container';
     }
 
-     Start the whole process when the page loads
+    // Start the whole process when the page loads
     initializePlayer();
-script
-body
-html
+</script>
+</body>
+</html>
