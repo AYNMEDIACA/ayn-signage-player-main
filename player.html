@@ -8,6 +8,8 @@
     <style>
         body, html { margin: 0; padding: 0; width: 100%; height: 100%; background-color: #000; color: #fff; overflow: hidden; font-family: sans-serif; }
         .container { width: 100%; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; }
+        #playback-view { width: 100%; height: 100%; display: flex; justify-content: center; align-items: center; }
+        #playback-view img, #playback-view video { max-width: 100%; max-height: 100%; object-fit: contain; }
         .pairing-box { background: #1a1a1a; padding: 40px; border-radius: 8px; }
         .pairing-code { font-size: 5em; font-family: monospace; letter-spacing: 0.2em; padding: 20px; margin: 20px 0; border: 1px solid #333; background: #000; }
         .spinner { border: 4px solid rgba(255, 255, 255, 0.3); border-radius: 50%; border-top: 4px solid #fff; width: 24px; height: 24px; animation: spin 1s linear infinite; margin: 0 auto; }
@@ -15,33 +17,21 @@
     </style>
 </head>
 <body>
-    <div id="loading-view" class="container">
-        <h1>Initializing Player...</h1>
-    </div>
-
-    <div id="pairing-view" class="container" style="display:none;">
-        <div class="pairing-box">
-            <h1>Pair This Screen</h1>
-            <p>Enter the code below into your AYN Signage CMS dashboard:</p>
-            <div id="pairing-code-display" class="pairing-code"></div>
-            <div class="spinner"></div>
-            <p>Waiting for manager to claim this screen...</p>
-        </div>
-    </div>
-
-    <div id="playback-view" style="display:none;">
-        </div>
+    <div id="loading-view" class="container"><h1>Initializing Player...</h1></div>
+    <div id="pairing-view" class="container" style="display:none;"><div class="pairing-box"><h1>Pair This Screen</h1><p>Enter the code below into your AYN Signage CMS dashboard:</p><div id="pairing-code-display" class="pairing-code"></div><div class="spinner"></div><p>Waiting for manager to claim this screen...</p></div></div>
+    <div id="playback-view" style="display:none;"></div>
 
 <script>
-    // --- CONFIGURATION ---
     const SUPABASE_URL = 'https://hlpihjisaxijhimyufaq.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhscGloamlzYXhpamhpbXl1ZmFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYwODEzMDQsImV4cCI6MjA3MTY1NzMwNH0.ecu2jbGDD6Qb9ct6UR5z2PBaxkvv2OBP5KOmcj1ujHE';
 
-    // --- THIS LINE IS NOW FIXED ---
-    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const anonSupabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     let pollingInterval = null;
+    let playbackTimeoutId = null;
+    let currentPlaylist = [];
+    let currentItemIndex = -1;
 
-    // A simple function to generate a new UUID
+    function generateUUID() { /* ... same as before ... */ }
     function generateUUID() {
         return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
             var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
@@ -51,27 +41,16 @@
 
     async function initializePlayer() {
         let deviceId = localStorage.getItem('ayn_device_id');
-        let deviceJwt = localStorage.getItem('ayn_device_jwt');
-
-        if (deviceJwt) {
-            console.log("Device is paired. Starting playback.");
-            showView('playback-view');
-            startPlayback(deviceId, deviceJwt);
-        } else if (deviceId) {
-            console.log("Device is waiting to be claimed.");
+        if (deviceId) {
+            console.log("Device has an ID. Checking claim status.");
             startPollingForClaim(deviceId);
         } else {
             console.log("First start. Generating new device ID and pairing code.");
             deviceId = generateUUID();
             localStorage.setItem('ayn_device_id', deviceId);
-
             const pairingCode = Math.floor(100000 + Math.random() * 900000).toString();
             
-            const { error } = await supabaseClient.rpc('register_unclaimed_device', {
-                device_id_in: deviceId,
-                pairing_code_in: pairingCode
-            });
-
+            const { error } = await anonSupabase.rpc('register_unclaimed_device', { device_id_in: deviceId, pairing_code_in: pairingCode });
             if (error) {
                 alert("Could not register with server: " + error.message);
                 return;
@@ -86,36 +65,85 @@
         showView('pairing-view');
         pollingInterval = setInterval(async () => {
             console.log("Checking claim status...");
-            // Check the main `screens` table to see if our ID exists.
-            const { data, error } = await supabaseClient.from('screens').select('id').eq('id', deviceId).single();
-
-            if(data) {
-                // WE'VE BEEN CLAIMED!
+            const { data, error } = await anonSupabase.from('screens').select('id, assigned_playlist_id').eq('id', deviceId).single();
+            if (data) {
                 console.log("Device has been claimed!");
                 clearInterval(pollingInterval);
-                // For now, we will just proceed. In the future, this is where we would get a long-term JWT.
-                localStorage.setItem('ayn_device_jwt', 'TEMPORARY_JWT_NEEDS_REPLACEMENT'); // Placeholder
                 showView('playback-view');
-                startPlayback(deviceId, 'TEMPORARY_JWT_NEEDS_REPLACEMENT');
+                startPlayback(deviceId);
             }
         }, 5000);
+    }
+
+    // --- NEW: FULL PLAYBACK LOGIC ---
+    async function startPlayback(deviceId) {
+        const deviceSupabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY); // Will use anon key for now
+
+        const fetchAndPlay = async () => {
+            console.log("Fetching playlist...");
+            const { data, error } = await deviceSupabase.rpc('get_playlist_for_screen', { screen_id_in: deviceId });
+            
+            if (error) {
+                console.error("Error fetching playlist:", error.message);
+                document.getElementById('playback-view').innerHTML = `<div class="container"><h1>Error fetching playlist</h1></div>`;
+                setTimeout(fetchAndPlay, 10000); // Retry after 10 seconds
+                return;
+            }
+            
+            if (data && data.length > 0) {
+                currentPlaylist = data;
+                currentItemIndex = -1;
+                playNextItem();
+            } else {
+                currentPlaylist = [];
+                document.getElementById('playback-view').innerHTML = `<div class="container"><h1>No content assigned</h1></div>`;
+                setTimeout(fetchAndPlay, 5000); // Check again in 5 seconds
+            }
+        };
+
+        const playNextItem = async () => {
+            clearTimeout(playbackTimeoutId);
+            const playbackContainer = document.getElementById('playback-view');
+            playbackContainer.innerHTML = '';
+
+            currentItemIndex = (currentItemIndex + 1) % currentPlaylist.length;
+            const item = currentPlaylist[currentItemIndex];
+            
+            const { data, error } = await deviceSupabase.storage.from('media_assets').createSignedUrl(item.storage_path, 60);
+            if (error) {
+                console.error("Could not get signed URL", error);
+                playNextItem(); // Skip to next item
+                return;
+            }
+            
+            const signedUrl = data.signedUrl;
+
+            if (item.type === 'image') {
+                const img = document.createElement('img');
+                img.src = signedUrl;
+                playbackContainer.appendChild(img);
+                playbackTimeoutId = setTimeout(playNextItem, item.duration_seconds * 1000);
+            } else if (item.type === 'video') {
+                const video = document.createElement('video');
+                video.src = signedUrl;
+                video.autoplay = true;
+                video.muted = true;
+                video.onended = playNextItem;
+                video.onerror = () => { console.error("Video error"); playNextItem(); };
+                playbackContainer.appendChild(video);
+            }
+        };
+
+        fetchAndPlay();
     }
 
     function showView(viewId) {
         document.getElementById('loading-view').style.display = 'none';
         document.getElementById('pairing-view').style.display = 'none';
         document.getElementById('playback-view').style.display = 'none';
-        // Use flex for containers, block for the playback view
-        document.getElementById(viewId).style.display = (viewId === 'playback-view') ? 'block' : 'flex';
+        document.getElementById(viewId).style.display = 'flex';
     }
 
-    function startPlayback(deviceId, jwt) {
-        const playbackContainer = document.getElementById('playback-view');
-        playbackContainer.innerHTML = `<div class="container"><h1>Playback Started!</h1><p>Device ID: ${deviceId}</p><p>Next step: Fetch and display playlist.</p></div>`;
-        playbackContainer.className = 'container';
-    }
-
-    // Start the whole process when the page loads
     initializePlayer();
 </script>
 </body>
