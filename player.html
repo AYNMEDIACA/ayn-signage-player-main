@@ -18,33 +18,21 @@
 </head>
 <body>
     <div id="loading-view" class="container"><h1>Initializing Player...</h1></div>
-    <div id="pairing-view" class="container" style="display:none;">
-        <div class="pairing-box">
-            <h1>Pair This Screen</h1>
-            <p>Enter the code below into your AYN Signage CMS dashboard:</p>
-            <div id="pairing-code-display" class="pairing-code"></div>
-            <div class="spinner"></div>
-            <p>Waiting for manager to claim this screen...</p>
-        </div>
-    </div>
+    <div id="pairing-view" class="container" style="display:none;"><div class="pairing-box"><h1>Pair This Screen</h1><p>Enter the code below into your AYN Signage CMS dashboard:</p><div id="pairing-code-display" class="pairing-code"></div><div class="spinner"></div><p>Waiting for manager to claim this screen...</p></div></div>
     <div id="playback-view" style="display:none;"></div>
 
 <script>
     const SUPABASE_URL = 'https://hlpihjisaxijhimyufaq.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhscGloamlzYXhpamhpbXl1ZmFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTYwODEzMDQsImV4cCI6MjA3MTY1NzMwNH0.ecu2jbGDD6Qb9ct6UR5z2PBaxkvv2OBP5KOmcj1ujHE';
+    const EDGE_FUNCTIONS_BASE_URL = `${SUPABASE_URL}/functions/v1`;
 
-    const supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const anonSupabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
     let pollingInterval = null;
     let playbackTimeoutId = null;
     let currentPlaylist = [];
     let currentItemIndex = -1;
 
-    function generateUUID() {
-        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-            var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
-            return v.toString(16);
-        });
-    }
+    function generateUUID() { return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => { const r = Math.random() * 16 | 0, v = c === 'x' ? r : (r & 0x3 | 0x8); return v.toString(16); }); }
 
     async function initializePlayer() {
         let deviceId = localStorage.getItem('ayn_device_id');
@@ -60,7 +48,7 @@
             localStorage.setItem('ayn_device_id', deviceId);
         }
 
-        const { data: existingCode, error: checkError } = await supabaseClient.rpc('get_pairing_code', { device_id_in: deviceId });
+        const { data: existingCode, error: checkError } = await anonSupabase.rpc('get_pairing_code', { device_id_in: deviceId });
         if (checkError) {
             alert(`Error checking with server: ${checkError.message}`);
             return;
@@ -69,10 +57,7 @@
         let pairingCode = existingCode;
         if (!pairingCode) {
             pairingCode = deviceId.slice(-10).toUpperCase();
-            const { error: registerError } = await supabaseClient.rpc('register_unclaimed_device', {
-                device_id_in: deviceId,
-                pairing_code_in: pairingCode
-            });
+            const { error: registerError } = await anonSupabase.rpc('register_unclaimed_device', { device_id_in: deviceId, pairing_code_in: pairingCode });
             if (registerError) {
                 alert("Could not register with server: " + registerError.message);
                 return;
@@ -86,20 +71,43 @@
     function startPollingForClaim(deviceId) {
         showView('pairing-view');
         pollingInterval = setInterval(async () => {
-            const { data, error } = await supabaseClient.from('screens').select('id, assigned_playlist_id').eq('id', deviceId).single();
+            const { data } = await anonSupabase.from('screens').select('id').eq('id', deviceId).single();
 
             if (data) {
-                console.log("Device has been claimed!");
+                console.log("Device has been claimed! Fetching permanent token...");
                 clearInterval(pollingInterval);
-                showView('playback-view');
-                startPlayback(deviceId);
+                
+                // --- NEW: Call a new Edge Function to get a real JWT ---
+                try {
+                    const response = await fetch(`${EDGE_FUNCTIONS_BASE_URL}/get-device-jwt`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${SUPABASE_ANON_KEY}` },
+                        body: JSON.stringify({ device_id: deviceId }),
+                    });
+
+                    if (!response.ok) {
+                        const err = await response.json();
+                        throw new Error(err.error);
+                    }
+
+                    const { jwt } = await response.json();
+                    localStorage.setItem('ayn_device_jwt', jwt);
+                    startPlayback(deviceId, jwt);
+
+                } catch (error) {
+                    alert("Error getting authentication token: " + error.message);
+                }
             }
         }, 5000);
     }
 
-    async function startPlayback(deviceId) {
-        // NOTE: This uses the anon key for now. A full implementation would get a real JWT.
-        const deviceSupabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    async function startPlayback(deviceId, jwt) {
+        showView('playback-view');
+
+        // --- NEW: Create a single, authenticated client that will be used for all requests ---
+        const deviceSupabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+            global: { headers: { Authorization: `Bearer ${jwt}` } },
+        });
 
         const fetchAndPlay = async () => {
             console.log("Fetching playlist...");
@@ -124,9 +132,9 @@
         };
 
         const playNextItem = async () => {
-            clearTimeout(playbackTimeoutId);
             const playbackContainer = document.getElementById('playback-view');
             playbackContainer.innerHTML = '';
+            clearTimeout(playbackTimeoutId);
 
             if (currentPlaylist.length === 0) return;
 
@@ -136,7 +144,7 @@
             const { data, error } = await deviceSupabase.storage.from('media_assets').createSignedUrl(item.storage_path, 60);
             if (error) {
                 console.error("Could not get signed URL", error);
-                playNextItem(); // Skip to next item
+                playNextItem();
                 return;
             }
             
